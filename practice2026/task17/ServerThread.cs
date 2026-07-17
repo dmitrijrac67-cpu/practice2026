@@ -8,11 +8,13 @@ public class ServerThread
 {
     private readonly BlockingCollection<ICommand> _taskQueue = new();
     private readonly Thread _worker;
+    private readonly IScheduler? _scheduler;
     private Action _currentMode;
     private bool _active = true;
 
-    public ServerThread()
+    public ServerThread(IScheduler? scheduler = null)
     {
+        _scheduler = scheduler;
         _currentMode = ProcessNormal;
         _worker = new Thread(MainLoop);
     }
@@ -69,8 +71,30 @@ public class ServerThread
         ICommand? command = null;
         try
         {
-            command = _taskQueue.Take();
-            command.Execute();
+            if (_scheduler == null)
+            {
+                command = _taskQueue.Take();
+                ExecuteCommand(command);
+            }
+            else
+            {
+                int waitTime = _scheduler.HasCommand() ? 0 : Timeout.Infinite;
+
+                if (_taskQueue.TryTake(out var cmd, waitTime))
+                {
+                    command = cmd;
+                    ExecuteCommand(command);
+                }
+                else if (_scheduler.HasCommand())
+                {
+                    command = _scheduler.Select();
+                    ExecuteCommand(command);
+                }
+                else if (_taskQueue.IsCompleted)
+                {
+                    _active = false;
+                }
+            }
         }
         catch (InvalidOperationException)
         {
@@ -90,9 +114,15 @@ public class ServerThread
         ICommand? command = null;
         try
         {
-            if (_taskQueue.TryTake(out command))
+            if (_taskQueue.TryTake(out var cmd))
             {
-                command.Execute();
+                command = cmd;
+                ExecuteCommand(command);
+            }
+            else if (_scheduler != null && _scheduler.HasCommand())
+            {
+                command = _scheduler.Select();
+                ExecuteCommand(command);
             }
             else
             {
@@ -105,6 +135,16 @@ public class ServerThread
             {
                 ExceptionHandler.OnException?.Invoke(ex, command);
             }
+        }
+    }
+
+    private void ExecuteCommand(ICommand cmd)
+    {
+        cmd.Execute();
+
+        if (_scheduler != null && cmd is ILongCommand longCmd && !longCmd.IsCompleted)
+        {
+            _scheduler.Add(cmd);
         }
     }
 
